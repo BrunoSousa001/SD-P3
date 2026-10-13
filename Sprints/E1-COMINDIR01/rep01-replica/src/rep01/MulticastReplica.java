@@ -33,6 +33,13 @@ public class MulticastReplica {
                         file.append(r);
                         System.out.println("Aplicado: " + r.toLine());
                         ultimo++;
+
+                        while(retidos.containsKey(ultimo+1)){  //  Caso o registo seguinte esteja na TreeMap escreve-o no ficheiro local e remove de retidos
+                            SensorRecord r2 = retidos.remove(ultimo+1);
+                            file.append(r2);
+                            System.out.println("Aplicado: " + r2.toLine());
+                            ultimo++;
+                        }
                     }
                     else if(r.getSeq() <= ultimo){  //  Registo Duplicado
                         System.out.println("DUPLICADO: " + r.getSeq());
