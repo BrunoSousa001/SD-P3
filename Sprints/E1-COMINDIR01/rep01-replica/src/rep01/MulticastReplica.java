@@ -74,7 +74,7 @@ public class MulticastReplica {
                     }
                     if (r.getSensorId().equals("SIM")) {
                         System.out.print("\rInicio: " + tPrimeiro + "\tFim: " + tUltimo + "\tRecebidos: " + recebidos
-                                + "\tEscritos: " + escritos + "\tRetidos: " + retidos.size() + "\n");
+                                + "\tEscritos: " + escritos + "\tRetidos: " + retidos.size());
                     }
                 } catch (Exception e) {
                     System.out.println("REJEITADO: " + line);
