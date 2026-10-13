@@ -11,18 +11,43 @@ public class MulticastLeader {
 
     public static void main(String[] args) {
         try (MulticastSocket socket = new MulticastSocket();
-             Scanner sc = new Scanner(System.in)) {
+                Scanner sc = new Scanner(System.in)) {
             InetAddress group = InetAddress.getByName(GROUP);
-            socket.setTimeToLive(1);                                // o datagrama não sai da rede local
+            socket.setTimeToLive(1); // o datagrama não sai da rede local
             RecordFile file = new RecordFile("lider.txt");
-            long seq = file.lastSeq();                              // continua a numeração após reinício
+            long seq = file.lastSeq(); // continua a numeração após reinício
             System.out.println("Líder pronto. Formato: <sensor> <temperatura> | 'sair' para terminar");
             while (true) {
                 System.out.print("> ");
-                if (!sc.hasNextLine()) break;                       // bloqueia à espera do utilizador
+                if (!sc.hasNextLine())
+                    break; // bloqueia à espera do utilizador
                 String line = sc.nextLine().trim();
-                if (line.equalsIgnoreCase("sair")) break;
+                if (line.equalsIgnoreCase("sair"))
+                    break;
+
                 String[] p = line.split("\\s+");
+
+                if (p[0].equalsIgnoreCase("rajada")) { // se p[0] for comando rajada
+                    if (p.length != 2) {
+                        System.out.println("Uso: rajada <n>");
+                        continue;
+                    }
+                    long tempoinicio = System.currentTimeMillis();
+                    int nrajadas = Integer.parseInt(p[1]);
+                    while (nrajadas != 0) {
+                        double randomTemp = 15.0 + Math.random() * 15.0;
+                        SensorRecord r = SensorRecord.now(++seq, "SIM", randomTemp);
+                        file.append(r);
+                        byte[] m = r.toLine().getBytes(StandardCharsets.UTF_8);
+                        socket.send(new DatagramPacket(m, m.length, group, PORT));
+                        nrajadas--;
+                    }
+                    long tempofim = System.currentTimeMillis();
+                    System.out.println("Inicio: " + tempoinicio / 1000 + " Fim: " + tempofim / 1000 + " Tempo: "
+                            + (tempofim - tempoinicio) / 1000);
+                    continue; // volta ao início do while
+                }
+
                 if (p.length != 2) {
                     System.out.println("Formato inválido.");
                     continue;
@@ -35,9 +60,9 @@ public class MulticastLeader {
                     continue;
                 }
                 SensorRecord r = SensorRecord.now(++seq, p[0], temp);
-                file.append(r);                                     // 1) escreve localmente
+                file.append(r); // 1) escreve localmente
                 byte[] m = r.toLine().getBytes(StandardCharsets.UTF_8);
-                socket.send(new DatagramPacket(m, m.length, group, PORT));  // 2) propaga para o grupo
+                socket.send(new DatagramPacket(m, m.length, group, PORT)); // 2) propaga para o grupo
                 System.out.println("Registado e enviado: " + r.toLine());
             }
         } catch (IOException e) {
