@@ -47,7 +47,7 @@ public class PartitionLeader {
                             return;
                         }
 
-                        String sensor = f[0];
+                        String sensor = f[0]; //PEGA EM S01
                         double temp = Double.parseDouble(f[1]);
 
                         // Validação de Partição (Ponto 9 da Ficha)
