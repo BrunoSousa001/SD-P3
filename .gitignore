@@ -1,2 +1,8 @@
 .clawdea/REPO_STATE.md
 *.class
+.env
+**/.env
+master.key
+**/master.key
+target/
+**/target/
