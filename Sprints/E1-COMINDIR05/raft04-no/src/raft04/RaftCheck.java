@@ -1,49 +1,305 @@
 package raft04;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class RaftCheck {
     public static void main(String[] args) throws Exception {
-        int N = 3;
-        Path dir = Paths.get(".");
+        int N = args.length > 0 ? Integer.parseInt(args[0]) : 3;
+        Path dir = args.length > 1 ? Paths.get(args[1]) : Paths.get(".");
+        Path falhasFile = args.length > 2 ? Paths.get(args[2]) : dir.resolve("falhas.txt");
 
-        // 1. Segurança de Eleição (Nenhum termo com >1 líder)
-        Map<String, Integer> lideres = new HashMap<>();
+        System.out.println("=== RELATÓRIO RAFT CHECK COMPLETO ===");
+
+        Map<Integer, Map<Long, List<String>>> cands = new HashMap<>();
+        Map<Integer, Map<Long, List<String>>> votos = new HashMap<>();
+        Map<Integer, Map<Long, String>> lids = new HashMap<>();
+        Map<Integer, Map<Long, Long>> tCand = new HashMap<>();
+        Map<Integer, Map<Long, Long>> tLid = new HashMap<>();
+        Map<Integer, Integer> ultimoLider = new HashMap<>();
+
+        long[] primeiroArranquePart = new long[N];
+        long[] primeiroLiderPart = new long[N];
+        Arrays.fill(primeiroArranquePart, Long.MAX_VALUE);
+        Arrays.fill(primeiroLiderPart, Long.MAX_VALUE);
+        long primeiroArranqueGlobal = Long.MAX_VALUE;
+
+        Map<String, Integer> lideresPorTermo = new HashMap<>();
+        boolean monotono = true;
+
+        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
         for (int k = 0; k < N; k++) {
+            cands.put(k, new TreeMap<>());
+            votos.put(k, new TreeMap<>());
+            lids.put(k, new TreeMap<>());
+            tCand.put(k, new HashMap<>());
+            tLid.put(k, new HashMap<>());
+
             for (int i = 1; i <= 3; i++) {
-                Path p = dir.resolve("eventos-p" + k + "-n" + i + ".txt");
-                if (!Files.exists(p)) continue;
-                for (String line : Files.readAllLines(p)) {
-                    String[] f = line.split(";");
-                    if (f[1].equals("LIDER")) {
-                        lideres.put("p" + k + "-" + f[3], lideres.getOrDefault("p" + k + "-" + f[3], 0) + 1);
+                Path ev = dir.resolve("eventos-p" + k + "-n" + i + ".txt");
+                if (!Files.exists(ev)) continue;
+
+                long maxTermoNo = 0;
+                for (String line : Files.readAllLines(ev, StandardCharsets.UTF_8)) {
+                    if (line.isBlank()) continue;
+                    String[] f = line.split(";", 4);
+                    long t = Long.parseLong(f[0]);
+                    String evType = f[1];
+                    String det = f.length > 3 ? f[3] : "";
+
+                    if (evType.equals("ARRANQUE")) {
+                        primeiroArranquePart[k] = Math.min(primeiroArranquePart[k], t);
+                        primeiroArranqueGlobal = Math.min(primeiroArranqueGlobal, t);
+                    } else if (evType.equals("CANDIDATO")) {
+                        long termo = Long.parseLong(det.split("=")[1].split(";")[0]);
+                        if (termo < maxTermoNo) monotono = false;
+                        maxTermoNo = Math.max(maxTermoNo, termo);
+                        cands.get(k).computeIfAbsent(termo, x -> new ArrayList<>()).add("n" + i);
+                        tCand.get(k).putIfAbsent(termo, t);
+                    } else if (evType.equals("VOTO")) {
+                        long termo = Long.parseLong(det.split("termo=")[1].split(";")[0]);
+                        if (termo < maxTermoNo) monotono = false;
+                        maxTermoNo = Math.max(maxTermoNo, termo);
+                        if (det.contains("concedido")) {
+                            String cand = det.split("candidato=")[1].split(";")[0];
+                            votos.get(k).computeIfAbsent(termo, x -> new ArrayList<>()).add(cand);
+                        }
+                    } else if (evType.equals("LIDER")) {
+                        long termo = Long.parseLong(det.split("termo=")[1].split(";")[0]);
+                        if (termo < maxTermoNo) monotono = false;
+                        maxTermoNo = Math.max(maxTermoNo, termo);
+                        lids.get(k).put(termo, "n" + i);
+                        tLid.get(k).putIfAbsent(termo, t);
+                        ultimoLider.put(k, i);
+                        lideresPorTermo.put("p" + k + "-term" + termo, lideresPorTermo.getOrDefault("p" + k + "-term" + termo, 0) + 1);
+                        primeiroLiderPart[k] = Math.min(primeiroLiderPart[k], t);
+                    } else if (evType.equals("TERMO")) {
+                        String[] tr = det.split("->");
+                        long oldT = Long.parseLong(tr[0]);
+                        long newT = Long.parseLong(tr[1]);
+                        if (newT <= oldT || oldT < maxTermoNo || newT < maxTermoNo) monotono = false;
+                        maxTermoNo = Math.max(maxTermoNo, newT);
                     }
                 }
             }
         }
-        boolean safe = true;
-        for (var e : lideres.entrySet()) {
-            if (e.getValue() > 1) {
-                System.out.println("❌ Múltiplos líderes no termo: " + e.getKey());
-                safe = false;
+
+        System.out.println("\n--- Histórico de Eleições ---");
+        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
+        for (int k = 0; k < N; k++) {
+            Set<Long> todos = new TreeSet<>();
+            todos.addAll(cands.get(k).keySet());
+            todos.addAll(lids.get(k).keySet());
+            for (Long t : todos) {
+                String l = lids.get(k).get(t);
+                List<String> c = cands.get(k).getOrDefault(t, Collections.emptyList());
+                List<String> v = votos.get(k).getOrDefault(t, Collections.emptyList());
+                if (l != null) {
+                    long dur = tLid.get(k).get(t) - tCand.get(k).getOrDefault(t, tLid.get(k).get(t));
+                    System.out.println("p" + k + " Termo " + t + ": CAND=" + c + ", VOTOS=" + v + ", LIDER=" + l + " (Dur: " + dur + " ms)");
+                } else {
+                    System.out.println("p" + k + " Termo " + t + ": CAND=" + c + ", VOTOS=" + v + ", VOTO DIVIDIDO");
+                }
             }
         }
-        if (safe) System.out.println("✅ Segurança: 0 termos com múltiplos líderes.");
 
-        // 2. Coincidência Final e Truncagens
+        boolean seguro = true;
+        for (var e : lideresPorTermo.entrySet()) if (e.getValue() > 1) seguro = false;
+        System.out.println("\nSegurança: " + (seguro ? "0 termos com múltiplos líderes." : "FALHOU (múltiplos líderes num termo)"));
+        System.out.println("Termos Monotónicos: " + (monotono ? "O termo nunca diminuiu." : "FALHOU (regressão de termo detetada)"));
+
+        System.out.println("\n--- Tempo até ao 1.º Líder por Partição ---");
+        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
         for (int k = 0; k < N; k++) {
+            if (primeiroLiderPart[k] != Long.MAX_VALUE && primeiroArranqueGlobal != Long.MAX_VALUE) {
+                long desdeGlobal = primeiroLiderPart[k] - primeiroArranqueGlobal;
+                long desdePart = primeiroLiderPart[k] - primeiroArranquePart[k];
+                System.out.println("p" + k + ": " + desdePart + " ms (desde 1.º arranque da partição) | " + desdeGlobal + " ms (desde 1.º arranque global)");
+            }
+        }
+
+        // 2. Se existir falhas.txt, mede a indisponibilidade até ao 1.º LOTE de termo superior e as leituras enviadas nesse intervalo
+        if (Files.exists(falhasFile)) {
+            System.out.println("\n--- Indisponibilidades ---");
+            List<String> produtorLog = Files.exists(dir.resolve("produtor.txt"))
+                    ? Files.readAllLines(dir.resolve("produtor.txt"), StandardCharsets.UTF_8) : Collections.emptyList();
+
+            for (String falha : Files.readAllLines(falhasFile, StandardCharsets.UTF_8)) {
+                if (falha.isBlank()) continue;
+                String[] f = falha.split(";");
+                if (f.length < 3) continue;
+                int p = Integer.parseInt(f[0].replace("p", ""));
+                long tFalha = Long.parseLong(f[2]);
+
+                // Termo mais alto observado em LOTE até tFalha
+                long termoNaFalha = 0;
+                for (int i = 1; i <= 3; i++) {
+                    Path hb = dir.resolve("hb-p" + p + "-n" + i + ".txt");
+                    if (!Files.exists(hb)) continue;
+                    for (String line : Files.readAllLines(hb, StandardCharsets.UTF_8)) {
+                        if (line.isBlank()) continue;
+                        String[] h = line.split(";");
+                        long tLote = Long.parseLong(h[2]);
+                        if (tLote <= tFalha) termoNaFalha = Math.max(termoNaFalha, Long.parseLong(h[0]));
+                    }
+                }
+
+                long tNovoLote = Long.MAX_VALUE;
+                long novoTermo = -1;
+                for (int i = 1; i <= 3; i++) {
+                    Path hb = dir.resolve("hb-p" + p + "-n" + i + ".txt");
+                    if (!Files.exists(hb)) continue;
+                    for (String line : Files.readAllLines(hb, StandardCharsets.UTF_8)) {
+                        if (line.isBlank()) continue;
+                        String[] h = line.split(";");
+                        long term = Long.parseLong(h[0]);
+                        long tLote = Long.parseLong(h[2]);
+                        if (tLote > tFalha && term > termoNaFalha && tLote < tNovoLote) {
+                            tNovoLote = tLote;
+                            novoTermo = term;
+                            break;
+                        }
+                    }
+                }
+
+                if (tNovoLote != Long.MAX_VALUE) {
+                    long indisp = tNovoLote - tFalha;
+                    List<String> noIntervalo = new ArrayList<>();
+                    for (String pl : produtorLog) {
+                        if (pl.isBlank()) continue;
+                        String[] pf = pl.split(";");
+                        if (pf.length >= 4 && pf[1].equals("p" + p)) {
+                            long t = Long.parseLong(pf[0]);
+                            if (t >= tFalha && t <= tNovoLote) noIntervalo.add(pf[2] + "=" + pf[3]);
+                        }
+                    }
+                    System.out.println("p" + p + " falhou em " + tFalha + " (termo " + termoNaFalha + " -> " + novoTermo
+                            + ") | Indisp: " + indisp + " ms | Leituras enviadas no intervalo: " + noIntervalo.size() + " " + noIntervalo);
+                }
+            }
+        }
+
+        // 3. Verifica eventos TRUNCADO (e quantos descartados existem no líder final com outro seq) + coincidência final dos 3 nós
+        System.out.println("\n--- Truncagens e Coincidência ---");
+        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
+        for (int k = 0; k < N; k++) {
+            Map<String, Integer> multisetLider = new HashMap<>();
+            if (ultimoLider.containsKey(k)) {
+                Path leaderLog = dir.resolve("no-p" + k + "-n" + ultimoLider.get(k) + ".txt");
+                if (Files.exists(leaderLog)) {
+                    for (String line : Files.readAllLines(leaderLog, StandardCharsets.UTF_8)) {
+                        if (line.isBlank()) continue;
+                        String[] f = line.split(";");
+                        String key = f[2] + ":" + Double.parseDouble(f[3]);
+                        multisetLider.merge(key, 1, Integer::sum);
+                    }
+                }
+            }
+
             int truncados = 0;
             for (int i = 1; i <= 3; i++) {
-                Path p = dir.resolve("eventos-p" + k + "-n" + i + ".txt");
-                if (Files.exists(p)) {
-                    for (String l : Files.readAllLines(p)) {
-                        if (l.contains("TRUNCADO")) truncados++;
+                Path ev = dir.resolve("eventos-p" + k + "-n" + i + ".txt");
+                if (!Files.exists(ev)) continue;
+                for (String l : Files.readAllLines(ev, StandardCharsets.UTF_8)) {
+                    if (l.contains(";TRUNCADO;")) {
+                        truncados++;
+                        String det = l.split(";", 4)[3];
+                        int noLider = 0;
+                        if (det.contains("registos=[")) {
+                            String raw = det.substring(det.indexOf("registos=[") + 10);
+                            raw = raw.substring(0, raw.indexOf(']'));
+                            if (!raw.isBlank()) {
+                                Map<String, Integer> copia = new HashMap<>(multisetLider);
+                                for (String item : raw.split(",")) {
+                                    String key = item.trim();
+                                    int c = copia.getOrDefault(key, 0);
+                                    if (c > 0) {
+                                        noLider++;
+                                        copia.put(key, c - 1);
+                                    }
+                                }
+                            }
+                        }
+                        System.out.println("p" + k + " n" + i + ": " + det + " | No líder final com outro seq: " + noLider);
                     }
                 }
             }
-            System.out.println("Partição p" + k + ": " + truncados + " eventos TRUNCADO.");
+            if (truncados == 0) System.out.println("p" + k + ": 0 eventos TRUNCADO.");
+
+            Map<Long, String> n1 = carregarMapa(dir.resolve("no-p" + k + "-n1.txt"));
+            Map<Long, String> n2 = carregarMapa(dir.resolve("no-p" + k + "-n2.txt"));
+            Map<Long, String> n3 = carregarMapa(dir.resolve("no-p" + k + "-n3.txt"));
+            if (n1.isEmpty() || n2.isEmpty() || n3.isEmpty()) {
+                System.out.println("p" + k + ": ficheiro em falta/vazio num dos nós para coincidência.");
+                continue;
+            }
+
+            long minSeq = Math.min(n1.keySet().stream().max(Long::compare).orElse(0L),
+                    Math.min(n2.keySet().stream().max(Long::compare).orElse(0L),
+                            n3.keySet().stream().max(Long::compare).orElse(0L)));
+
+            List<Long> divs = new ArrayList<>();
+            for (long s = 1; s <= minSeq; s++) {
+                String l1 = n1.get(s), l2 = n2.get(s), l3 = n3.get(s);
+                if (l1 == null || l2 == null || l3 == null || !l1.equals(l2) || !l1.equals(l3)) divs.add(s);
+            }
+            System.out.println("p" + k + " (até seq=" + minSeq + "): " + (divs.isEmpty() ? "IDÊNTICOS" : "DIVERGEM em " + divs));
         }
+
+        // 4. Compara o multiconjunto (sensor, temperatura) de produtor.txt com os registos únicos persistidos nos nós da partição
+        System.out.println("\n--- Leituras Perdidas Globais ---");
+        Map<Integer, Map<String, Integer>> enviadasPorPart = new HashMap<>();
+        for (int k = 0; k < N; k++) enviadasPorPart.put(k, new HashMap<>());
+        if (Files.exists(dir.resolve("produtor.txt"))) {
+            for (String line : Files.readAllLines(dir.resolve("produtor.txt"), StandardCharsets.UTF_8)) {
+                if (line.isBlank()) continue;
+                String[] f = line.split(";");
+                if (f.length >= 4) {
+                    int k = Integer.parseInt(f[1].replace("p", ""));
+                    String key = f[2] + ";" + Double.parseDouble(f[3]);
+                    enviadasPorPart.get(k).merge(key, 1, Integer::sum);
+                }
+            }
+        }
+
+        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
+        for (int k = 0; k < N; k++) {
+            // União por (seq, termo, sensor, temp) para não contar o mesmo registo replicado em 3 nós
+            Set<String> uniaoRegistos = new HashSet<>();
+            for (int i = 1; i <= 3; i++) {
+                Path noFile = dir.resolve("no-p" + k + "-n" + i + ".txt");
+                if (!Files.exists(noFile)) continue;
+                for (String line : Files.readAllLines(noFile, StandardCharsets.UTF_8)) {
+                    if (line.isBlank()) continue;
+                    String[] f = line.split(";");
+                    uniaoRegistos.add(f[0] + ";" + f[1] + ";" + f[2] + ";" + Double.parseDouble(f[3]));
+                }
+            }
+            Map<String, Integer> gravadas = new HashMap<>();
+            for (String u : uniaoRegistos) {
+                String[] f = u.split(";", 3);
+                gravadas.merge(f[2], 1, Integer::sum);
+            }
+
+            int perdidas = 0;
+            for (var e : enviadasPorPart.get(k).entrySet()) {
+                int env = e.getValue();
+                int grav = gravadas.getOrDefault(e.getKey(), 0);
+                if (env > grav) perdidas += (env - grav);
+            }
+            System.out.println("p" + k + ": " + perdidas + " leituras perdidas.");
+        }
+    }
+
+    private static Map<Long, String> carregarMapa(Path p) throws Exception {
+        Map<Long, String> m = new HashMap<>();
+        if (!Files.exists(p)) return m;
+        for (String line : Files.readAllLines(p, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) continue;
+            String[] f = line.split(";");
+            if (f.length > 0) m.put(Long.parseLong(f[0]), line);
+        }
+        return m;
     }
 }

@@ -7,6 +7,7 @@ public final class Wire {
     public static final int LIMITE_RETIDOS = 10;
     public static final int T_TCP_MS = 5000;
     public static final double LIMIAR_ALARME = 28.0;
+    public static final String IPFS_API = System.getProperty("raft04.ipfs", "http://127.0.0.1:5001/api/v0");
 
     // Parâmetros atualizados (prefixo raft04)
     public static final long PERIODO_HB_MS = Long.getLong("raft04.periodo", 2000L);

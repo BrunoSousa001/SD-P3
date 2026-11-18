@@ -4,6 +4,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 
 public final class Wire {
+    public static final String IPFS_API = System.getProperty("raft04.ipfs", "http://127.0.0.1:5001/api/v0");
     public static final int LIMITE_RETIDOS = 10;
     public static final int T_TCP_MS = 5000;
     public static final double LIMIAR_ALARME = 28.0;
