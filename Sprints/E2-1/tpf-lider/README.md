@@ -6,15 +6,13 @@ O token do bot Discord **nunca** deve ser incluído no repositório. O ficheiro 
 
 O token pode ser configurado de três formas (por ordem de preferência):
 
-1. **Ficheiro `.env`** (na pasta do projeto ou na pasta `E2-S1`):
+1. **Ficheiro `.env`** (na pasta do projeto `tpf-lider` ou na pasta `E2-1`):
    ```env
    BOT_TOKEN=o_teu_token_aqui
    ```
 
 2. **Variável de Ambiente do Sistema:**
-   ```bash
-   export BOT_TOKEN="o_teu_token_aqui"        # Linux / macOS
-   set BOT_TOKEN="o_teu_token_aqui"           # Windows CMD
+   ```powershell
    $env:BOT_TOKEN="o_teu_token_aqui"          # Windows PowerShell
    ```
 
@@ -25,6 +23,15 @@ O token pode ser configurado de três formas (por ordem de preferência):
 
 ## Como Arrancar o Líder
 
-1. No IntelliJ IDEA, abrir o projeto ou adicionar o `pom.xml` como módulo Maven.
-2. Aguardar que o IntelliJ resolva a dependência do JDA.
-3. Executar a classe principal `tpf.LeaderBot`.
+Podes arrancar o bot de duas formas simples:
+
+1. **Via PowerShell (com o wrapper incluído):**
+   ```powershell
+   cd Sprints\E2-1\tpf-lider
+   .\run.ps1
+   ```
+
+2. **Via Maven (se tiveres Maven instalado ou via IDE):**
+   ```bash
+   mvn compile exec:java
+   ```
