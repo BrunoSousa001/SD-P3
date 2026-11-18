@@ -30,6 +30,7 @@ public final class Batch {
         this.count = count;
     }
 
+    // Serializa o lote no formato: LOTE;<termo>;<lider>;<endereço>;<porto>;<hb>;<ultimoSeq>;<ultimoTermo>;<n> seguido dos registos
     public String encode() {
         StringBuilder sb = new StringBuilder();
         // NOVO: LOTE;term;leader;address;port;hb;lastSeq;lastTerm;n
@@ -43,6 +44,7 @@ public final class Batch {
         return sb.toString();
     }
 
+    // Descodifica um LOTE completo (cabeçalho + n linhas de registo); falha se o n.º de linhas não bater certo com o cabeçalho
     public static Batch decode(String msg, int n) {
         String[] linhas = msg.strip().split("\\r?\\n");
         Batch h = cabecalho(linhas[0]);
@@ -56,11 +58,13 @@ public final class Batch {
         return new Batch(h.term, h.leader, h.address, h.port, h.hb, h.lastSeq, h.lastTerm, records, h.count);
     }
 
+    // Descodifica apenas a 1.ª linha (cabeçalho) — usado pelo Producer e AlarmProcessor para ver heartbeat/termo
     public static Batch decodeHeader(String msg) {
         String primeira = msg.strip().split("\\r?\\n", 2)[0];
         return cabecalho(primeira);
     }
 
+    // Valida os 9 campos do cabeçalho e que count >= 0
     private static Batch cabecalho(String linha) {
         String[] f = linha.trim().split(";");
         if (f.length != 9 || !f[0].equals("LOTE")) { // NOVO: Agora são 9 campos no cabeçalho

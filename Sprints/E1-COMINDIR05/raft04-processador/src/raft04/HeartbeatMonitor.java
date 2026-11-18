@@ -17,10 +17,13 @@ public class HeartbeatMonitor {
         this.partition = partition;
     }
 
+    // Processa o cabeçalho de um LOTE (termo, líder, número de heartbeat) para detetar falhas e mudanças de líder
     public synchronized void onHeartbeat(long term, int leader, long hb) {
         long now = System.currentTimeMillis();
-        if (term < lastTerm) return; // Ignora termos antigos
+        // Lote de termo inferior ao já observado: vem de um líder obsoleto, ignora
+        if (term < lastTerm) return;
 
+        // Termo aumentou: houve eleição de novo líder; reinicia contagem de hb e sai de SUSPEITO se necessário
         if (term > lastTerm) {
             if (lastTerm != -1) {
                 log("NOVO_LIDER", "p" + partition + ";termo=" + term + ";lider=n" + leader);
@@ -32,6 +35,7 @@ public class HeartbeatMonitor {
                 state = "OK";
                 log("RETOMA", "p" + partition + ";lider=n" + leader);
             }
+        // Mesmo termo: só aceita hb crescente; se houver salto (hb > lastHb + 1) perdeu-se um lote pelo meio
         } else if (hb > lastHb) {
             if (hb > lastHb + 1) {
                 log("HB_PERDIDO", "p" + partition + ";esperado=" + (lastHb+1) + ";recebido=" + hb);
@@ -45,6 +49,7 @@ public class HeartbeatMonitor {
         }
     }
 
+    // Marca a partição como SUSPEITA se já teve líder e passaram mais de FATOR_TIMEOUT * PERIODO_HB_MS sem heartbeats
     public synchronized void checkTimeout(long now) {
         if (!state.equals("SUSPEITO") && lastTerm != -1 && (now - lastTime > Wire.PERIODO_HB_MS * Wire.FATOR_TIMEOUT)) {
             state = "SUSPEITO";

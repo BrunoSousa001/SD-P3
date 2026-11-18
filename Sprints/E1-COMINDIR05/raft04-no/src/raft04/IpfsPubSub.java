@@ -8,6 +8,9 @@ import java.util.Base64;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
+/**
+ * Cliente HTTP mínimo para a API PubSub do daemon IPFS (Kubo).
+ */
 public class IpfsPubSub {
     private final String api;                                       // ex.: http://127.0.0.1:5001/api/v0
     private final HttpClient http = HttpClient.newHttpClient();
@@ -22,6 +25,7 @@ public class IpfsPubSub {
                 .encodeToString(s.getBytes(StandardCharsets.UTF_8));
     }
 
+    // Descodifica uma string multibase ('u' + base64url) recebida do stream JSON do Kubo
     static String fromMultibase(String s) {
         if (!s.startsWith("u")) {
             throw new IllegalArgumentException("Codificação multibase não suportada: " + s);

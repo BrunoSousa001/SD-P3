@@ -11,6 +11,10 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 
+/**
+ * Máquina de estados RAFT de um nó da partição: gere termos, papéis, votos e prazos de eleição.
+ * Todos os métodos públicos são synchronized para garantir atomicidade nas transições de estado.
+ */
 public final class RaftState {
 
     // Papéis que um nó pode assumir
@@ -48,7 +52,7 @@ public final class RaftState {
         this.stateFile = stateFile;
         this.log = log;
 
-        // Leitura inicial do estado persistente
+        // Leitura inicial do estado persistente: se o nó já correu antes, retoma o último termo e em quem votou
         if (Files.exists(stateFile)) {
             String[] f = Files.readString(stateFile, StandardCharsets.UTF_8).trim().split(";");
             if (f.length >= 2) {
@@ -56,7 +60,7 @@ public final class RaftState {
                 votedFor = Integer.parseInt(f[1]);
             }
         } else {
-            // Se o ficheiro não existe, cria-o logo com 0;0
+            // Primeiro arranque: cria logo estado-p<k>-n<i>.txt com 0;0
             persist();
         }
 
@@ -64,7 +68,7 @@ public final class RaftState {
         resetTimer();
     }
 
-    // Sorteia um novo prazo de eleição
+    // Sorteia um prazo uniforme em [minNanos, maxNanos] para reduzir a probabilidade de votos divididos
     private void resetTimer() {
         long t = (maxNanos > minNanos)
                 ? ThreadLocalRandom.current().nextLong(minNanos, maxNanos + 1)

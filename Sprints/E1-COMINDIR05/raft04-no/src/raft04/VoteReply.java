@@ -13,10 +13,12 @@ public final class VoteReply {
         this.granted = granted;
     }
 
+    // Serializa no formato: VOTO;<termo>;<eleitor>;<candidato>;<S|N>
     public String encode() {
         return "VOTO;" + term + ";" + voter + ";" + candidate + ";" + (granted ? "S" : "N");
     }
 
+    // Descodifica e valida uma mensagem VOTO recebida no tópico de eleição
     public static VoteReply decode(String msg) {
         String[] f = msg.strip().split(";");
 

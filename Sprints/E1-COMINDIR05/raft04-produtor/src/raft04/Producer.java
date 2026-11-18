@@ -5,6 +5,10 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 
+/**
+ * Produtor de leituras: lê comandos da consola ('rajada' ou '<sensor> <temp>'),
+ * monitoriza heartbeats por partição para avisar se o líder estiver SUSPEITO e publica IN em raft04-in-p<k>.
+ */
 public class Producer {
     public static void main(String[] args) throws Exception {
         int numParticoes = args.length > 0 ? Integer.parseInt(args[0]) : 3;
@@ -47,10 +51,12 @@ public class Producer {
         System.out.println("Comandos: 'rajada <n> <delay_ms>' ou '<sensor> <temp>'");
         String[] todosSensores = {"S00", "S01", "S02", "S03", "S04", "S05"};
 
+        // Loop interativo de leitura da consola: aceita 'rajada <n> <delay_ms>' ou '<sensor> <temp>'
         while (true) {
             if (scanner.hasNextLine()) {
                 String line = scanner.nextLine().trim();
                 if (line.isBlank()) continue;
+                // Modo rajada: envia numLeituras pelos 6 sensores com pausa delay entre envios
                 if (line.startsWith("rajada ")) {
                     String[] p = line.split("\\s+");
                     int numLeituras = Integer.parseInt(p[1]);
@@ -61,6 +67,7 @@ public class Producer {
                         enviarLeitura(sensor, temp, numParticoes, monitors, ipfs);
                         if (delay > 0) Thread.sleep(delay);
                     }
+                // Modo manual: envia uma leitura única <sensor> <temperatura>
                 } else {
                     String[] p = line.split("\\s+");
                     if (p.length >= 2) {

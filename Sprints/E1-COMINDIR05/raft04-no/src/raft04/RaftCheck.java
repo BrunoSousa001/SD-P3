@@ -4,6 +4,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 
+/**
+ * Ferramenta de análise a posteriori (RaftCheck <N> <pasta> [falhas.txt]).
+ * Reconstrói eleições, verifica segurança e monotonicidade de termos, mede indisponibilidades,
+ * analisa eventos TRUNCADO, confirma coincidência final dos 3 nós e conta leituras perdidas.
+ */
 public class RaftCheck {
     public static void main(String[] args) throws Exception {
         int N = args.length > 0 ? Integer.parseInt(args[0]) : 3;
@@ -48,15 +53,18 @@ public class RaftCheck {
                     String evType = f[1];
                     String det = f.length > 3 ? f[3] : "";
 
+                    // Regista o primeiro instante em que algum nó da partição arrancou
                     if (evType.equals("ARRANQUE")) {
                         primeiroArranquePart[k] = Math.min(primeiroArranquePart[k], t);
                         primeiroArranqueGlobal = Math.min(primeiroArranqueGlobal, t);
+                    // Nova candidatura: verifica se o termo não regrediu face ao máximo já visto neste nó
                     } else if (evType.equals("CANDIDATO")) {
                         long termo = Long.parseLong(det.split("=")[1].split(";")[0]);
                         if (termo < maxTermoNo) monotono = false;
                         maxTermoNo = Math.max(maxTermoNo, termo);
                         cands.get(k).computeIfAbsent(termo, x -> new ArrayList<>()).add("n" + i);
                         tCand.get(k).putIfAbsent(termo, t);
+                    // Resposta a pedido de voto: se foi concedido, associa o voto ao candidato nesse termo
                     } else if (evType.equals("VOTO")) {
                         long termo = Long.parseLong(det.split("termo=")[1].split(";")[0]);
                         if (termo < maxTermoNo) monotono = false;
@@ -65,6 +73,7 @@ public class RaftCheck {
                             String cand = det.split("candidato=")[1].split(";")[0];
                             votos.get(k).computeIfAbsent(termo, x -> new ArrayList<>()).add(cand);
                         }
+                    // Eleição vencida: contabiliza líderes por termo (deve ser <= 1) e tempo até ao 1.º líder
                     } else if (evType.equals("LIDER")) {
                         long termo = Long.parseLong(det.split("termo=")[1].split(";")[0]);
                         if (termo < maxTermoNo) monotono = false;
@@ -74,6 +83,7 @@ public class RaftCheck {
                         ultimoLider.put(k, i);
                         lideresPorTermo.put("p" + k + "-term" + termo, lideresPorTermo.getOrDefault("p" + k + "-term" + termo, 0) + 1);
                         primeiroLiderPart[k] = Math.min(primeiroLiderPart[k], t);
+                    // Mudança de termo: confirma que o termo novo é estritamente maior e nunca regrediu (nem entre reinícios)
                     } else if (evType.equals("TERMO")) {
                         String[] tr = det.split("->");
                         long oldT = Long.parseLong(tr[0]);
@@ -86,7 +96,7 @@ public class RaftCheck {
         }
 
         System.out.println("\n--- Histórico de Eleições ---");
-        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
+        // Percorre os termos observados em cada partição para mostrar candidatos, votos e vencedor (ou voto dividido)
         for (int k = 0; k < N; k++) {
             Set<Long> todos = new TreeSet<>();
             todos.addAll(cands.get(k).keySet());
@@ -95,6 +105,7 @@ public class RaftCheck {
                 String l = lids.get(k).get(t);
                 List<String> c = cands.get(k).getOrDefault(t, Collections.emptyList());
                 List<String> v = votos.get(k).getOrDefault(t, Collections.emptyList());
+                // Se houve evento LIDER neste termo, calcula a duração da eleição; senão houve voto dividido / falta de quórum
                 if (l != null) {
                     long dur = tLid.get(k).get(t) - tCand.get(k).getOrDefault(t, tLid.get(k).get(t));
                     System.out.println("p" + k + " Termo " + t + ": CAND=" + c + ", VOTOS=" + v + ", LIDER=" + l + " (Dur: " + dur + " ms)");
@@ -104,13 +115,13 @@ public class RaftCheck {
             }
         }
 
+        // Segurança: verifica se algum termo na mesma partição teve mais do que 1 líder
         boolean seguro = true;
         for (var e : lideresPorTermo.entrySet()) if (e.getValue() > 1) seguro = false;
         System.out.println("\nSegurança: " + (seguro ? "0 termos com múltiplos líderes." : "FALHOU (múltiplos líderes num termo)"));
         System.out.println("Termos Monotónicos: " + (monotono ? "O termo nunca diminuiu." : "FALHOU (regressão de termo detetada)"));
 
         System.out.println("\n--- Tempo até ao 1.º Líder por Partição ---");
-        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
         for (int k = 0; k < N; k++) {
             if (primeiroLiderPart[k] != Long.MAX_VALUE && primeiroArranqueGlobal != Long.MAX_VALUE) {
                 long desdeGlobal = primeiroLiderPart[k] - primeiroArranqueGlobal;
@@ -132,7 +143,7 @@ public class RaftCheck {
                 int p = Integer.parseInt(f[0].replace("p", ""));
                 long tFalha = Long.parseLong(f[2]);
 
-                // Termo mais alto observado em LOTE até tFalha
+                // Descobre qual era o termo ativo antes da falha (último LOTE publicado até tFalha)
                 long termoNaFalha = 0;
                 for (int i = 1; i <= 3; i++) {
                     Path hb = dir.resolve("hb-p" + p + "-n" + i + ".txt");
@@ -145,6 +156,7 @@ public class RaftCheck {
                     }
                 }
 
+                // Procura o primeiro LOTE publicado após tFalha por um líder de termo estritamente superior
                 long tNovoLote = Long.MAX_VALUE;
                 long novoTermo = -1;
                 for (int i = 1; i <= 3; i++) {
@@ -163,6 +175,7 @@ public class RaftCheck {
                     }
                 }
 
+                // Se encontrou recuperação, calcula a duração da indisponibilidade e conta leituras enviadas nesse intervalo
                 if (tNovoLote != Long.MAX_VALUE) {
                     long indisp = tNovoLote - tFalha;
                     List<String> noIntervalo = new ArrayList<>();
@@ -182,8 +195,8 @@ public class RaftCheck {
 
         // 3. Verifica eventos TRUNCADO (e quantos descartados existem no líder final com outro seq) + coincidência final dos 3 nós
         System.out.println("\n--- Truncagens e Coincidência ---");
-        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
         for (int k = 0; k < N; k++) {
+            // Constrói o multiconjunto (sensor:temp) do registo final do último líder para cruzar com os descartados
             Map<String, Integer> multisetLider = new HashMap<>();
             if (ultimoLider.containsKey(k)) {
                 Path leaderLog = dir.resolve("no-p" + k + "-n" + ultimoLider.get(k) + ".txt");
@@ -206,6 +219,7 @@ public class RaftCheck {
                         truncados++;
                         String det = l.split(";", 4)[3];
                         int noLider = 0;
+                        // Verifica quantos dos registos descartados também existem no líder final (com outro seq)
                         if (det.contains("registos=[")) {
                             String raw = det.substring(det.indexOf("registos=[") + 10);
                             raw = raw.substring(0, raw.indexOf(']'));
@@ -227,6 +241,7 @@ public class RaftCheck {
             }
             if (truncados == 0) System.out.println("p" + k + ": 0 eventos TRUNCADO.");
 
+            // Carrega os ficheiros finais dos 3 nós para verificar coincidência linha a linha até ao menor ultimoSeq
             Map<Long, String> n1 = carregarMapa(dir.resolve("no-p" + k + "-n1.txt"));
             Map<Long, String> n2 = carregarMapa(dir.resolve("no-p" + k + "-n2.txt"));
             Map<Long, String> n3 = carregarMapa(dir.resolve("no-p" + k + "-n3.txt"));
@@ -239,6 +254,7 @@ public class RaftCheck {
                     Math.min(n2.keySet().stream().max(Long::compare).orElse(0L),
                             n3.keySet().stream().max(Long::compare).orElse(0L)));
 
+            // Compara cada seq de 1 até ao menor ultimoSeq comum entre os 3 nós
             List<Long> divs = new ArrayList<>();
             for (long s = 1; s <= minSeq; s++) {
                 String l1 = n1.get(s), l2 = n2.get(s), l3 = n3.get(s);
@@ -251,6 +267,7 @@ public class RaftCheck {
         System.out.println("\n--- Leituras Perdidas Globais ---");
         Map<Integer, Map<String, Integer>> enviadasPorPart = new HashMap<>();
         for (int k = 0; k < N; k++) enviadasPorPart.put(k, new HashMap<>());
+        // Conta quantas vezes cada par (sensor;temperatura) foi enviado pelo produtor para cada partição
         if (Files.exists(dir.resolve("produtor.txt"))) {
             for (String line : Files.readAllLines(dir.resolve("produtor.txt"), StandardCharsets.UTF_8)) {
                 if (line.isBlank()) continue;
@@ -263,7 +280,6 @@ public class RaftCheck {
             }
         }
 
-        // 1. Leitura dos eventos de cada nó para reconstruir eleições, segurança, monotonicidade e tempo até ao 1.º líder
         for (int k = 0; k < N; k++) {
             // União por (seq, termo, sensor, temp) para não contar o mesmo registo replicado em 3 nós
             Set<String> uniaoRegistos = new HashSet<>();
@@ -276,6 +292,7 @@ public class RaftCheck {
                     uniaoRegistos.add(f[0] + ";" + f[1] + ";" + f[2] + ";" + Double.parseDouble(f[3]));
                 }
             }
+            // Converte a união num multiconjunto (sensor;temp -> quantidade) e subtrai do total enviado
             Map<String, Integer> gravadas = new HashMap<>();
             for (String u : uniaoRegistos) {
                 String[] f = u.split(";", 3);

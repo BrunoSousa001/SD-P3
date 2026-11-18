@@ -6,6 +6,10 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 
+/**
+ * Processador de alarmes: subscreve os LOTE de todas as partições, filtra termos obsoletos,
+ * deduplica registos por (seq, termo), mantém (Lp, Vp) e publica ALARM-<sensor> quando temp >= LIMIAR_ALARME.
+ */
 public class AlarmProcessor {
     private static final Object lock = new Object();
     private static VectorClock vp;
@@ -50,10 +54,12 @@ public class AlarmProcessor {
                                 long lSnap;
                                 VectorClock vSnap;
                                 synchronized (lock) {
+                                    // Se este par (seq, termo) já foi tratado, ignora (evita duplicados)
                                     if (!processados.add(id)) continue;
                                     // Atualiza conhecimento causal (Lp, Vp) com todos os registos válidos observados
                                     lp = Math.max(lp, r.getLamport());
                                     vp.merge(r.getVector());
+                                    // Só publica alarme se a temperatura atingir ou ultrapassar o limiar configurado
                                     if (r.getTemperature() < Wire.LIMIAR_ALARME) continue;
                                     lSnap = lp;
                                     vSnap = vp.copy();

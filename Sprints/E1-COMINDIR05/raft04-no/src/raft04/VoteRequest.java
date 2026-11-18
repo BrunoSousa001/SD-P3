@@ -13,10 +13,12 @@ public final class VoteRequest {
         this.lastTerm = lastTerm;
     }
 
+    // Serializa no formato: PEDIDO_VOTO;<termo>;<candidato>;<ultimoSeq>;<ultimoTermo>
     public String encode() {
         return "PEDIDO_VOTO;" + term + ";" + candidate + ";" + lastSeq + ";" + lastTerm;
     }
 
+    // Descodifica e valida uma mensagem PEDIDO_VOTO recebida no tópico de eleição
     public static VoteRequest decode(String msg) {
         String[] f = msg.strip().split(";");
 

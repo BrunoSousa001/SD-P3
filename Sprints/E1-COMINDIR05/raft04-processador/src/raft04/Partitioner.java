@@ -1,16 +1,8 @@
 package raft04;
 
 public class Partitioner {
-    // Distribui os sensores pelas partições de forma determinística
+    // Partição determinística por hash (igual à ficha anterior: S02 e S05 -> p1 quando N=3)
     public static int getPartition(String sensor, int n) {
-        if (sensor.startsWith("S")) {
-            try {
-                int id = Integer.parseInt(sensor.substring(1));
-                return id % n;
-            } catch (NumberFormatException e) {
-                return 0;
-            }
-        }
-        return Math.abs(sensor.hashCode()) % n;
+        return Math.floorMod(sensor.hashCode(), n);
     }
 }

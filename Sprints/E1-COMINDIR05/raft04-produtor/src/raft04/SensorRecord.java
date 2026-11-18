@@ -20,16 +20,18 @@ public class SensorRecord {
         this.vector = vector;
     }
 
+    // Cria um novo registo carimbado com o instante atual do nó
     public static SensorRecord now(long seq, long term, String sensorId, double temperature,
                                    long lamport, VectorClock vector) {
         return new SensorRecord(seq, term, sensorId, temperature, System.currentTimeMillis(), lamport, vector);
     }
 
-    // NOVO formato: seq;term;sensor;temperatura;instante;L;V
+    // Formato da linha em ficheiro e em LOTE: seq;term;sensor;temperatura;instante;L;V
     public String toLine() {
         return seq + ";" + term + ";" + sensorId + ";" + temperature + ";" + timestamp + ";" + lamport + ";" + vector;
     }
 
+    // Converte uma linha de texto de volta para SensorRecord, validando os 7 campos
     public static SensorRecord fromLine(String line, int n) {
         String[] f = line.trim().split(";");
         if (f.length != 7) { // NOVO: Agora são 7 campos

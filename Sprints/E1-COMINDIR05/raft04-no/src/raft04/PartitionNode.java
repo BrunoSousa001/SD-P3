@@ -8,6 +8,11 @@ import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 
+/**
+ * Nó de partição (substitui PartitionLeader e Replica da ficha anterior).
+ * Cada partição k tem 3 nós idênticos (i = 1..3), um eleito LIDER e os outros SEGUIDORES.
+ * Comunica por 3 tópicos IPFS (IN, LOTE, ELEICAO) e mantém um servidor TCP para recuperação/truncagem.
+ */
 public class PartitionNode {
     private final int partition;
     private final int self;
@@ -50,6 +55,7 @@ public class PartitionNode {
     // Lê o ficheiro local de registos no arranque para retomar ultimoSeq, ultimoTermo, L e V.
     // Assim, se este nó se tornar líder, L e V continuam a partir do último registo (não recomeçam a zero).
     private void carregarEstadoDoFicheiro() throws IOException {
+        // Se já existe histórico em disco, percorre todas as linhas para restaurar o último estado causal
         if (Files.exists(logFile)) {
             List<String> linhas = Files.readAllLines(logFile, StandardCharsets.UTF_8);
             for (String l : linhas) {
@@ -62,16 +68,19 @@ public class PartitionNode {
                 expectedSeq = ultimoSeq + 1;
             }
         }
+        // Se o ficheiro não existia ou estava vazio, começa com relógio vetorial e Lamport a zero
         if (currentVector == null) {
             currentVector = new VectorClock(n);
             currentLamport = 0;
         }
     }
 
+    // Arranca o servidor TCP de recuperação, as 3 threads de subscrição IPFS e o timer periódico de eleição
     public void start() {
         logEvent("ARRANQUE", "ultimoSeq=" + ultimoSeq + ", ultimoTermo=" + ultimoTermo);
         iniciarServidorTCP();
 
+        // Subscreve leituras (IN), lotes/heartbeats (LOTE) e mensagens de eleição (PEDIDO_VOTO / VOTO)
         new Thread(() -> {
             try { ipfs.subscribe(Wire.topicIn(partition), this::handleIn); } catch (Exception e) { logEvent("ERRO", "sub IN: " + e.getMessage()); }
         }).start();
@@ -82,6 +91,7 @@ public class PartitionNode {
             try { ipfs.subscribe(Wire.topicElection(partition), this::handleElection); } catch (Exception e) { logEvent("ERRO", "sub ELEICAO: " + e.getMessage()); }
         }).start();
 
+        // Verifica a cada VERIFICACAO_MS (200 ms) se o prazo de eleição expirou
         ScheduledExecutorService tickExecutor = Executors.newSingleThreadScheduledExecutor();
         tickExecutor.scheduleAtFixedRate(this::checkTick, Wire.VERIFICACAO_MS, Wire.VERIFICACAO_MS, TimeUnit.MILLISECONDS);
     }
@@ -90,6 +100,7 @@ public class PartitionNode {
     // apenas bloqueia a publicação no tópico de eleição durante o isolamento.
     private void checkTick() {
         long term = raftState.tick();
+        // Só difunde PEDIDO_VOTO se o prazo expirou (term != -1) e o nó NÃO estiver isolado
         if (term != -1 && !Wire.isolated(partition, self)) {
             long uSeq, uTerm;
             synchronized (this) {
@@ -105,6 +116,7 @@ public class PartitionNode {
     // Ordem de locks: adquire sempre primeiro 'this' (PartitionNode) e só depois 'raftState' (evita deadlock).
     private void handleIn(String msg) {
         try {
+            // Ignora mensagens que não sejam leituras IN ou que pertençam a outra partição
             if (!msg.startsWith("IN;")) return;
             String[] f = Wire.body(msg).split(";");
             if (f.length != 4) return;
@@ -119,6 +131,7 @@ public class PartitionNode {
                 // Verifica papel e termo dentro do mesmo monitor em que atribui seq/termo:
                 // garante que nenhuma leitura recebe seq com termo antigo após o nó se demitir.
                 long t = raftState.termIfLeader();
+                // Se termIfLeader() devolver -1, este nó não é líder (é seguidor ou candidato) -> ignora o IN
                 if (t == -1) {
                     logEvent("IGNORADO", "IN recebido mas não sou líder");
                     return;
@@ -143,8 +156,10 @@ public class PartitionNode {
 
     // Trata pedidos de voto e respostas de voto no tópico raft04-eleicao-p<k> (ignorado se isolado).
     private void handleElection(String msg) {
+        // Simulação de partição de rede: nó isolado não recebe mensagens de eleição
         if (Wire.isolated(partition, self)) return;
         try {
+            // Caso 1: outro nó pediu voto (PEDIDO_VOTO)
             if (msg.startsWith("PEDIDO_VOTO")) {
                 VoteRequest req = VoteRequest.decode(msg);
                 if (req.candidate == self) return; // Ignora o próprio pedido difundido pelo PubSub
@@ -155,11 +170,14 @@ public class PartitionNode {
                 // Responde sempre (S ou N), para que o candidato saiba também se o seu termo ficou obsoleto
                 VoteReply reply = new VoteReply(vote.term, self, req.candidate, vote.granted);
                 try { ipfs.publish(Wire.topicElection(partition), reply.encode()); } catch (Exception ignored) {}
+            // Caso 2: resposta a um pedido de voto (VOTO)
             } else if (msg.startsWith("VOTO")) {
                 VoteReply reply = VoteReply.decode(msg);
                 if (reply.voter == self) return;
+                // Só processa votos dirigidos a este nó enquanto candidato
                 if (reply.candidate == self) {
                     synchronized (this) { // Ordem de locks: this -> raftState; impede IN de entrar antes de becomeLeader()
+                        // Se onVote devolver true, atingiu maioria exatamente agora -> assume liderança
                         if (raftState.onVote(reply.term, reply.voter, reply.candidate, reply.granted)) {
                             becomeLeader();
                         }
@@ -173,12 +191,14 @@ public class PartitionNode {
 
     // Trata lotes/heartbeats recebidos no tópico raft04-p<k> (comportamento de seguidor).
     private void handleBatch(String msg) {
+        // Simulação de partição de rede: nó isolado não processa lotes
         if (Wire.isolated(partition, self)) return;
         try {
             Batch b = Batch.decode(msg, n);
             if (b.leader == self) return; // Ignora os próprios lotes
 
             synchronized (this) { // Ordem de locks: this -> raftState
+                // Valida o termo do lote no RaftState (demite se b.term > term; rejeita se b.term < term)
                 if (raftState.onBatch(b.term, b.leader)) {
                     logEvent("RECEBIDO", "LOTE termo=" + b.term + " hb=" + b.hb);
                     // Deteta divergência se temos mais registos que o líder ou se o termo de ultimoSeq difere
@@ -190,6 +210,7 @@ public class PartitionNode {
                     // Se ainda faltam registos até b.lastSeq (ex.: lotes perdidos), recupera por TCP
                     if (ultimoSeq < b.lastSeq) recuperarDoLider(b.leader, ultimoSeq + 1);
                 } else {
+                    // Lote de termo inferior ao nosso (líder obsoleto) -> descartado
                     logEvent("IGNORADO", "LOTE termo=" + b.term);
                 }
             }
@@ -202,6 +223,7 @@ public class PartitionNode {
     // Deve ser chamado dentro de synchronized (this).
     private void resolverDivergencia(int leaderId) {
         try {
+            // Carrega todos os registos locais para memória para procurar o ponto de corte
             List<SensorRecord> locais = new ArrayList<>();
             if (Files.exists(logFile)) {
                 for (String l : Files.readAllLines(logFile, StandardCharsets.UTF_8)) {
@@ -210,7 +232,7 @@ public class PartitionNode {
             }
             if (locais.isEmpty()) return;
 
-            // Índices onde começa cada bloco de termo contíguo
+            // Identifica o índice onde começa cada bloco contíguo de registos com o mesmo termo
             List<Integer> blockStarts = new ArrayList<>();
             long prevTerm = Long.MIN_VALUE;
             for (int idx = 0; idx < locais.size(); idx++) {
@@ -221,7 +243,8 @@ public class PartitionNode {
                 }
             }
 
-            // Recua um bloco de termo de cada vez até o primeiro registo recebido coincidir com o local (ou chegar ao início)
+            // Recua um bloco de termo de cada vez e pede por TCP a partir do 1.º seq desse bloco,
+            // até o primeiro registo devolvido pelo líder coincidir (seq, term) com o local
             int chosenStartIdx = 0;
             List<SensorRecord> doLider = Collections.emptyList();
             for (int b = blockStarts.size() - 1; b >= 0; b--) {
@@ -237,6 +260,7 @@ public class PartitionNode {
                 }
             }
 
+            // Compara os registos locais com os do líder para achar o primeiro seq divergente (seqCorte)
             long seqCorte = -1;
             int localTailSize = locais.size() - chosenStartIdx;
             int minSize = Math.min(localTailSize, doLider.size());
@@ -249,6 +273,7 @@ public class PartitionNode {
                 }
             }
 
+            // Se os prefixos coincidem mas o ficheiro local tem registos a mais (incluindo líder vazio), corta o excesso
             if (seqCorte == -1 && localTailSize > doLider.size()) {
                 seqCorte = doLider.isEmpty()
                         ? locais.get(chosenStartIdx).getSeq()
@@ -257,6 +282,7 @@ public class PartitionNode {
 
             if (seqCorte == -1) return;
 
+            // Separa os registos válidos (< seqCorte) dos registos que vão ser descartados (>= seqCorte)
             long descartados = ultimoSeq - seqCorte + 1;
             List<Long> termosDescartados = new ArrayList<>();
             List<String> registosDescartados = new ArrayList<>();
@@ -271,10 +297,12 @@ public class PartitionNode {
                 }
             }
 
+            // Reescreve o ficheiro de forma atómica sem os registos divergentes
             Path tmp = Paths.get(logFile.toString() + ".tmp");
             Files.write(tmp, novasLinhas, StandardCharsets.UTF_8);
             Files.move(tmp, logFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
 
+            // Recalcula ultimoTermo, L e V a partir do último registo válido que ficou (para manter V[k]==seq e Lamport)
             if (novasLinhas.isEmpty()) {
                 ultimoTermo = 0;
                 currentVector = new VectorClock(n);
@@ -291,6 +319,7 @@ public class PartitionNode {
             logEvent("TRUNCADO", "de=" + seqCorte + ";descartados=" + descartados
                     + ";termos=" + termosDescartados + ";registos=" + registosDescartados);
 
+            // Aplica por cima os registos oficiais recebidos do líder a partir de seqCorte
             for (SensorRecord r : doLider) {
                 if (r.getSeq() >= seqCorte) {
                     gravarRegisto(r);
@@ -344,13 +373,16 @@ public class PartitionNode {
     // Aplica os registos recebidos num lote pela ordem: igual a expectedSeq -> grava; maior -> lacuna (TCP); menor -> verifica duplicado/divergência.
     private void aplicarRegistos(List<SensorRecord> records, int leaderId) {
         for (SensorRecord r : records) {
+            // Caso normal: é exatamente o próximo seq esperado
             if (r.getSeq() == expectedSeq) {
                 gravarRegisto(r);
                 expectedSeq++;
+            // Lacuna: saltou números de sequência (perdeu lotes) -> pede os em falta por TCP
             } else if (r.getSeq() > expectedSeq) {
                 logEvent("LACUNA", "esperava " + expectedSeq + " mas recebi " + r.getSeq());
                 recuperarDoLider(leaderId, expectedSeq);
                 return;
+            // Já tinha este seq: se o termo for diferente há divergência (truncagem); se for igual é duplicado e ignora
             } else if (r.getSeq() < expectedSeq) {
                 try {
                     for (String l : Files.readAllLines(logFile, StandardCharsets.UTF_8)) {
@@ -366,6 +398,7 @@ public class PartitionNode {
         }
     }
 
+    // Acrescenta um registo ao ficheiro local e atualiza o estado em memória (ultimoSeq, ultimoTermo, L e V)
     private void gravarRegisto(SensorRecord r) {
         try {
             Files.writeString(logFile, r.toLine() + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
@@ -378,7 +411,9 @@ public class PartitionNode {
         }
     }
 
+    // Cliente TCP de recuperação: pede ao nó leaderId todos os registos a partir de fromSeq
     private List<SensorRecord> pedirTCP(int leaderId, long fromSeq) throws IOException {
+        // Se algum dos dois nós estiver isolado, simula falha da ligação TCP
         if (Wire.isolated(partition, self) || Wire.isolated(partition, leaderId)) {
             throw new IOException("Ligação TCP indisponível por isolamento");
         }
@@ -397,6 +432,7 @@ public class PartitionNode {
         return result;
     }
 
+    // Pede registos em atraso ao líder e aplica apenas os que ainda faltam (>= expectedSeq)
     private void recuperarDoLider(int leaderId, long fromSeq) {
         try {
             List<SensorRecord> records = pedirTCP(leaderId, fromSeq);
@@ -412,6 +448,7 @@ public class PartitionNode {
         }
     }
 
+    // Servidor TCP de recuperação (aberto por qualquer nó no arranque para responder a pedidos PEDIDO)
     private void iniciarServidorTCP() {
         new Thread(() -> {
             try (ServerSocket server = new ServerSocket(Wire.nodePort(partition, self))) {
@@ -425,7 +462,9 @@ public class PartitionNode {
         }).start();
     }
 
+    // Responde a um pedido TCP enviando as linhas com seq >= from seguidas de FIM
     private void atenderTCP(Socket socket) {
+        // Se este nó estiver isolado, fecha imediatamente a ligação
         if (Wire.isolated(partition, self)) {
             try { socket.close(); } catch (IOException ignored) {}
             return;
@@ -437,6 +476,7 @@ public class PartitionNode {
                 long from = req.contains(";")
                         ? Long.parseLong(req.split(";")[1])
                         : Long.parseLong(req.trim().split("\\s+")[1]);
+                // Lê o ficheiro sob synchronized(this) para evitar conflitos com escritas/truncagens concorrentes
                 List<String> linhas;
                 synchronized (this) {
                     linhas = Files.exists(logFile) ? Files.readAllLines(logFile, StandardCharsets.UTF_8) : Collections.emptyList();
@@ -449,6 +489,7 @@ public class PartitionNode {
         } catch (Exception ignored) {}
     }
 
+    // Regista o evento na consola e em eventos-p<k>-n<i>.txt com o timestamp em milissegundos
     public void logEvent(String evento, String detalhe) {
         String linha = System.currentTimeMillis() + ";" + evento + ";p" + partition + ";" + detalhe;
         System.out.println("[p" + partition + "-n" + self + "] " + evento + " - " + detalhe);
@@ -457,6 +498,7 @@ public class PartitionNode {
         } catch (IOException ignored) {}
     }
 
+    // Ponto de entrada: PartitionNode <k> <i> [N] (por omissão N = 3 partições)
     public static void main(String[] args) throws Exception {
         int k = Integer.parseInt(args[0]);
         int i = Integer.parseInt(args[1]);

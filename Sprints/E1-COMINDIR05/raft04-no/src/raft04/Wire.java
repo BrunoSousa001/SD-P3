@@ -26,12 +26,12 @@ public final class Wire {
     public static String topicData(int k) { return "raft04-p" + k; }
     public static String topicElection(int k) { return "raft04-eleicao-p" + k; } // NOVO
 
-    // NOVO: Porto de recuperação TCP para o nó i da partição k
+    // Porto TCP de recuperação único por partição k e nó i (ex.: p1-n2 -> 7012)
     public static int nodePort(int k, int i) {
         return 7000 + (k * 10) + i;
     }
 
-    // NOVO: Simula a partição de rede
+    // Simula partição de rede: devolve true enquanto existir o ficheiro isolar-p<k>-n<i> na pasta de trabalho
     public static boolean isolated(int k, int i) {
         return Files.exists(Paths.get("isolar-p" + k + "-n" + i));
     }
@@ -40,6 +40,7 @@ public final class Wire {
         return "IN;" + sensor + ";" + temp + ";" + lamport + ";" + v;
     }
 
+    // Extrai o prefixo do tipo de mensagem (antes do primeiro ';')
     public static String type(String msg) {
         String m = msg.trim();
         int i = m.indexOf(';');
@@ -49,6 +50,7 @@ public final class Wire {
         return m.substring(0, i);
     }
 
+    // Extrai o corpo da mensagem (tudo depois do primeiro ';')
     public static String body(String msg) {
         String m = msg.trim();
         return m.substring(m.indexOf(';') + 1);
