@@ -6,3 +6,5 @@ master.key
 **/master.key
 target/
 **/target/
+*issue*.md
+**/*issue*.md
