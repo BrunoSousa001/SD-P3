@@ -6,7 +6,7 @@ O token do bot Discord **nunca** deve ser incluído no repositório. O ficheiro 
 
 O token pode ser configurado de três formas (por ordem de preferência):
 
-1. **Ficheiro `.env`** (na pasta do projeto ou na pasta `E2S1`):
+1. **Ficheiro `.env`** (na pasta do projeto ou na pasta `E2-S1`):
    ```env
    BOT_TOKEN=o_teu_token_aqui
    ```
