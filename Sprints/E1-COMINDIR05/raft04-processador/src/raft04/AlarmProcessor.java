@@ -4,73 +4,106 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 
+/**
+ * Processador de alarmes: subscreve os LOTE de todas as partições, filtra termos obsoletos,
+ * deduplica registos por (seq, termo), mantém (Lp, Vp) e publica ALARM-<sensor> quando temp >= LIMIAR_ALARME.
+ */
 public class AlarmProcessor {
+    private static final Object lock = new Object();
+    private static VectorClock vp;
+    private static long lp = 0;
+    private static int n;
+
     public static void main(String[] args) throws Exception {
-        int numParticoes = 3;
+        n = args.length > 0 ? Integer.parseInt(args[0]) : 3;
+        vp = new VectorClock(n);
+        IpfsPubSub ipfs = new IpfsPubSub(Wire.IPFS_API);
+
         Map<Integer, HeartbeatMonitor> monitors = new HashMap<>();
-
-        // Para garantir que tratamos apenas termos recentes
         Map<Integer, Long> maxTermoPorParticao = new ConcurrentHashMap<>();
-
-        // Para não processar o mesmo registo duas vezes (guarda "p0:seq:term")
         Set<String> processados = ConcurrentHashMap.newKeySet();
 
-        List<String> alarmesLog = new ArrayList<>();
-
-        System.out.println("Processador arrancado. À espera de LOTEs...");
-
-        for (int k = 0; k < numParticoes; k++) {
+        for (int k = 0; k < n; k++) {
             final int partition = k;
-            monitors.put(k, new HeartbeatMonitor("processador"));
+            monitors.put(partition, new HeartbeatMonitor("processador", partition));
 
-            PubSub.subscribe(Wire.topicData(k), msg -> {
-                Batch header = Batch.decodeHeader(msg);
+            // Subscreve os lotes de cada partição numa thread dedicada
+            new Thread(() -> {
+                try {
+                    ipfs.subscribe(Wire.topicData(partition), msg -> {
+                        try {
+                            // 1. Atualiza o detetor de falhas da partição (ignora termos antigos internamente)
+                            Batch header = Batch.decodeHeader(msg);
+                            monitors.get(partition).onHeartbeat(header.term, header.leader, header.hb);
 
-                // 1. Atualiza o monitor
-                monitors.get(partition).onHeartbeat(header.term, header.leader, header.hb);
-                monitors.get(partition).checkTimeout(System.currentTimeMillis());
+                            // 2. Descarta lotes de termos inferiores ao maior termo já observado nesta partição
+                            long maxTerm = maxTermoPorParticao.getOrDefault(partition, 0L);
+                            if (header.term < maxTerm) return;
+                            maxTermoPorParticao.put(partition, header.term);
 
-                // 2. Ignora lotes com termos mais antigos do que já vimos
-                long maxTerm = maxTermoPorParticao.getOrDefault(partition, 0L);
-                if (header.term < maxTerm) return;
-                maxTermoPorParticao.put(partition, header.term);
+                            Batch full = Batch.decode(msg, n);
+                            for (SensorRecord r : full.records) {
+                                // Evita gerar alarmes em cadeia sobre registos de alarme
+                                if (r.getSensorId().startsWith("ALARM-")) continue;
 
-                // 3. Processa os registos
-                Batch fullBatch = Batch.decode(msg, numParticoes);
-                for (SensorRecord r : fullBatch.records) {
-                    String idRegisto = "p" + partition + ":" + r.getSeq() + ":" + r.getTerm();
+                                // 3. Deduplicação por (seq, termo): um mesmo seq de outro termo (após substituição de líder)
+                                // representa uma nova escrita e deve ser avaliado de novo
+                                String id = "p" + partition + ":" + r.getSeq() + ":" + r.getTerm();
+                                long lSnap;
+                                VectorClock vSnap;
+                                synchronized (lock) {
+                                    // Se este par (seq, termo) já foi tratado, ignora (evita duplicados)
+                                    if (!processados.add(id)) continue;
+                                    // Atualiza conhecimento causal (Lp, Vp) com todos os registos válidos observados
+                                    lp = Math.max(lp, r.getLamport());
+                                    vp.merge(r.getVector());
+                                    // Só publica alarme se a temperatura atingir ou ultrapassar o limiar configurado
+                                    if (r.getTemperature() < Wire.LIMIAR_ALARME) continue;
+                                    lSnap = lp;
+                                    vSnap = vp.copy();
+                                }
 
-                    if (processados.contains(idRegisto)) continue; // Duplicado
-                    processados.add(idRegisto);
+                                // 4. Calcula a partição de destino pelo identificador "ALARM-<sensor>" (coincide com PartitionNode)
+                                String alarmMsg = "ALARM-" + r.getSensorId();
+                                int targetPartition = Partitioner.getPartition(alarmMsg, n);
+                                if (monitors.get(targetPartition).isSuspicious()) {
+                                    // Sem líder conhecido na partição de destino, avisa mas publica na mesma
+                                    String aviso = "partição p" + targetPartition + " sem líder conhecido; alarme " + alarmMsg + " pode perder-se";
+                                    System.out.println("AVISO: " + aviso);
+                                    monitors.get(targetPartition).logAviso(aviso);
+                                }
 
-                    // Se a temperatura for alta, gera alarme
-                    if (r.getTemperature() > Wire.LIMIAR_ALARME) {
-                        if (monitors.get(partition).isSuspicious()) {
-                            String aviso = "AVISO: partição p" + partition + " sem líder conhecido; alarme " + r.getSensorId() + " pode perder-se";
-                            System.out.println(aviso);
-                            alarmesLog.add(System.currentTimeMillis() + ";AVISO;" + aviso);
+                                try {
+                                    ipfs.publish(Wire.topicIn(targetPartition), Wire.in(alarmMsg, r.getTemperature(), lSnap, vSnap));
+                                } catch (Exception ignored) {}
+
+                                String linhaAlarme = System.currentTimeMillis() + ";ALARME;" + alarmMsg + ";temp=" + r.getTemperature() + "\n";
+                                synchronized (lock) {
+                                    try {
+                                        Files.writeString(Paths.get("alarmes-processador.txt"), linhaAlarme,
+                                                StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                                    } catch (IOException ignored) {}
+                                }
+                            }
+                        } catch (Exception e) {
+                            System.err.println("[p" + partition + "] Erro ao processar lote: " + e.getMessage());
                         }
-
-                        String alarme = "ALARME: Partição p" + partition + " | Sensor " + r.getSensorId() + " | Temp " + r.getTemperature() + " | seq=" + r.getSeq();
-                        System.out.println(alarme);
-                        alarmesLog.add(System.currentTimeMillis() + ";ALARME;" + alarme);
-                    }
+                    });
+                } catch (Exception e) {
+                    System.err.println("[p" + partition + "] Erro na subscrição: " + e.getMessage());
                 }
-            });
+            }).start();
         }
 
-        // Thread de verificação de timeouts
-        while (true) {
+        // Thread periódica para detetar timeouts de heartbeat (SUSPEITA) a cada VERIFICACAO_MS
+        ScheduledExecutorService exec = Executors.newSingleThreadScheduledExecutor();
+        exec.scheduleAtFixedRate(() -> {
             long now = System.currentTimeMillis();
-            for (int k = 0; k < numParticoes; k++) {
-                monitors.get(k).checkTimeout(now);
-            }
-            try {
-                Files.write(Paths.get("monitor-processador.txt"), alarmesLog, StandardCharsets.UTF_8);
-            } catch (IOException ignored) {}
-            Thread.sleep(500);
-        }
+            for (int k = 0; k < n; k++) monitors.get(k).checkTimeout(now);
+        }, Wire.VERIFICACAO_MS, Wire.VERIFICACAO_MS, TimeUnit.MILLISECONDS);
+
+        Thread.sleep(Long.MAX_VALUE);
     }
 }

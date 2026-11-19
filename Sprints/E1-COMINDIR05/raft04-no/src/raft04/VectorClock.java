@@ -2,6 +2,10 @@ package raft04;
 
 import java.util.Arrays;
 
+/**
+ * Relógio vetorial de dimensão N (um contador lógico por partição).
+ * Permite verificar causalidade (BEFORE/AFTER/CONCURRENT) e a invariante V[k] == seq.
+ */
 public final class VectorClock {
     public enum Order { BEFORE, AFTER, EQUAL, CONCURRENT }
 
@@ -35,7 +39,7 @@ public final class VectorClock {
         return new VectorClock(v.clone());
     }
 
-    // relação de this com other
+    // Compara dois vetores componente a componente para determinar ordem causal ou concorrência
     public Order compare(VectorClock other) {
         boolean menor = false, maior = false;
         for (int i = 0; i < v.length; i++) {
@@ -59,6 +63,7 @@ public final class VectorClock {
         return sb.toString();
     }
 
+    // Reconstrói o VectorClock a partir de texto CSV, validando a dimensão esperada n
     public static VectorClock parse(String s, int n) {
         String[] f = s.trim().split(",");
         if (f.length != n) {

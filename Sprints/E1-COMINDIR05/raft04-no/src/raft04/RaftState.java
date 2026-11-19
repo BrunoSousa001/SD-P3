@@ -11,6 +11,10 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 
+/**
+ * Máquina de estados RAFT de um nó da partição: gere termos, papéis, votos e prazos de eleição.
+ * Todos os métodos públicos são synchronized para garantir atomicidade nas transições de estado.
+ */
 public final class RaftState {
 
     // Papéis que um nó pode assumir
@@ -48,7 +52,7 @@ public final class RaftState {
         this.stateFile = stateFile;
         this.log = log;
 
-        // Leitura inicial do estado persistente
+        // Leitura inicial do estado persistente: se o nó já correu antes, retoma o último termo e em quem votou
         if (Files.exists(stateFile)) {
             String[] f = Files.readString(stateFile, StandardCharsets.UTF_8).trim().split(";");
             if (f.length >= 2) {
@@ -56,7 +60,7 @@ public final class RaftState {
                 votedFor = Integer.parseInt(f[1]);
             }
         } else {
-            // Se o ficheiro não existe, cria-o logo com 0;0
+            // Primeiro arranque: cria logo estado-p<k>-n<i>.txt com 0;0
             persist();
         }
 
@@ -64,7 +68,7 @@ public final class RaftState {
         resetTimer();
     }
 
-    // Sorteia um novo prazo de eleição
+    // Sorteia um prazo uniforme em [minNanos, maxNanos] para reduzir a probabilidade de votos divididos
     private void resetTimer() {
         long t = (maxNanos > minNanos)
                 ? ThreadLocalRandom.current().nextLong(minNanos, maxNanos + 1)
@@ -79,41 +83,43 @@ public final class RaftState {
         public Vote(long term, boolean granted) { this.term = term; this.granted = granted; }
     }
 
-    // Adotar um termo superior
+    // Adotar um termo superior: garante que um líder/candidato obsoleto se demite imediatamente
+    // e que votedFor volta a 0 porque um novo termo é uma nova eleição (evita perder o direito a votar no termo novo).
     private void adoptTerm(long newTerm) {
         if (role == Role.LIDER) {
             log.accept("DEMISSAO;p" + partition + ";termo=" + term);
         }
         log.accept("TERMO;p" + partition + ";" + term + "->" + newTerm);
         term = newTerm;
-        votedFor = 0; // Limpa o voto antigo
+        votedFor = 0; // Limpa o voto antigo (novo termo = nova eleição)
         role = Role.SEGUIDOR;
         leader = 0;
         persist();
     }
 
-    // Processar um PEDIDO_VOTO
+    // Processar um PEDIDO_VOTO de outro candidato
     public synchronized Vote onVoteRequest(long cTerm, int candidate, long cLastSeq, long cLastTerm,
                                            long myLastSeq, long myLastTerm) {
-        // 1. Se o termo do candidato for maior, adota
+        // 1. Se o termo do candidato for maior, adota-o (e se era líder/candidato, demite-se para SEGUIDOR)
         if (cTerm > term) {
             adoptTerm(cTerm);
         }
 
-        // 2. Verifica se o candidato está atualizado
+        // 2. Restrição de voto (upToDate): impede eleger um nó a quem faltam registos já presentes noutros nós.
+        // Compara primeiro o termo do último registo e, em caso de empate, o seq.
         boolean upToDate = cLastTerm > myLastTerm
                 || (cLastTerm == myLastTerm && cLastSeq >= myLastSeq);
 
-        // 3. As 3 condições
+        // 3. As 3 condições de voto: mesmo termo, ainda não votou (ou repete no mesmo candidato por perda de rede) e atualizado
         boolean granted = cTerm == term
                 && (votedFor == 0 || votedFor == candidate)
                 && upToDate;
 
-        // 4. Se conceder, grava no disco
+        // 4. Persiste ANTES de devolver a resposta para que, se reiniciar a seguir, não possa votar noutro candidato no mesmo termo
         if (granted) {
             votedFor = candidate;
             persist();
-            resetTimer();
+            resetTimer(); // Renova o prazo de eleição para não iniciar outra eleição logo de seguida
         }
 
         log.accept("VOTO;p" + partition + ";termo=" + term + ";candidato=n" + candidate
@@ -122,28 +128,28 @@ public final class RaftState {
         return new Vote(term, granted);
     }
 
-    // VOTO recebido: devolve true apenas no instante em que este nó se torna líder
+    // VOTO recebido: devolve true apenas no instante em que este nó atinge maioria e passa a líder
     public synchronized boolean onVote(long vTerm, int voter, int candidate, boolean granted) {
-        // 1. Se o voto trouxer um termo superior, adota-o e demite-se
+        // 1. Se a resposta trouxer um termo superior, adota-o e demite-se
         if (vTerm > term) {
             adoptTerm(vTerm);
             return false;
         }
 
-        // 2. Só processa o voto se eu for candidato neste termo, se o voto for para mim e se for "Sim"
+        // 2. Só processa se continuar CANDIDATO no mesmo termo, o voto for para si e tiver sido concedido
         if (role != Role.CANDIDATO || vTerm != term || candidate != self || !granted) {
             return false;
         }
 
-        // 3. Adiciona o voto ao conjunto (o Set ignora se o votante já lá estiver)
+        // 3. Adiciona o votante ao Set (idempotente: votos repetidos do mesmo nó não contam duas vezes)
         votes.add(voter);
 
-        // 4. Verifica a maioria (para grupo 3: > 3/2 -> > 1 -> 2 votos)
+        // 4. Maioria estrita: floor(G/2) + 1 (em G=3 são necessários > 1, isto é, 2 votos)
         if (votes.size() > groupSize / 2) {
             role = Role.LIDER;
             leader = self;
             log.accept("LIDER;p" + partition + ";termo=" + term + ";votos=" + votes);
-            return true; // Devolve true para o PartitionNode começar a enviar Lotes
+            return true; // Devolve true para o PartitionNode arrancar o envio periódico de LOTEs
         }
 
         return false;
@@ -151,36 +157,37 @@ public final class RaftState {
 
     // LOTE de outro nó: devolve true se o lote deve ser aplicado pelo PartitionNode
     public synchronized boolean onBatch(long bTerm, int bLeader) {
-        // 1. Lote com termo inferior (atrasado): ignorar
+        // 1. Lote de termo inferior vem de um líder obsoleto: ignorar
         if (bTerm < term) {
             return false;
         }
 
-        // 2. Lote com termo superior: adotar o termo (isto já muda o papel para SEGUIDOR e limpa o voto)
+        // 2. Lote de termo superior: adota o termo (demite líder/candidato antigo e limpa votedFor)
         if (bTerm > term) {
             adoptTerm(bTerm);
         }
 
-        // 3. Se eu for líder no mesmo termo, é um erro grave
+        // 3. Se eu ainda fosse líder no mesmo termo, seria violação da segurança (impossível com maioria + 1 voto/termo)
         if (role == Role.LIDER) {
             log.accept("ERRO;p" + partition + ";dois lideres no termo " + term);
             return false;
         }
 
-        // 4. Se eu era candidato, agora reconheço o líder e passo a seguidor
+        // 4. Um candidato que recebe LOTE válido do termo atual reconhece o líder e passa a seguidor
         role = Role.SEGUIDOR;
 
-        // 5. Atualizar o líder se for diferente do que tinha guardado
+        // 5. Atualiza o líder conhecido e regista mudança de liderança
         if (leader != bLeader) {
             leader = bLeader;
             log.accept("NOVO_LIDER;p" + partition + ";termo=" + term + ";lider=n" + bLeader);
         }
 
-        // 6. Recebemos um heartbeat válido, reiniciamos o despertador
+        // 6. Heartbeat válido recebido: renova o prazo aleatório de eleição
         resetTimer();
         return true;
     }
 
+    // Executado periodicamente a cada VERIFICACAO_MS: se o prazo expirou e não somos líder, inicia eleição
     public synchronized long tick() {
         if (role == Role.LIDER || System.nanoTime() < deadline) {
             return -1;
@@ -188,20 +195,21 @@ public final class RaftState {
 
         term++;
         votedFor = self;
-        persist(); // Grava no disco antes de mudar o papel
+        persist(); // Grava em disco ANTES de publicar PEDIDO_VOTO (evita perder o voto próprio após crash)
 
         role = Role.CANDIDATO;
         leader = 0;
         votes.clear();
         votes.add(self);
-        resetTimer();
+        resetTimer(); // Sorteia novo prazo aleatório para resolver eventuais votos divididos
 
         log.accept("CANDIDATO;p" + partition + ";termo=" + term);
 
         return term;
     }
 
-    // --- Persistência ---
+    // --- Persistência atómica ---
+    // Escreve num ficheiro temporário e move com ATOMIC_MOVE para evitar ficheiro corrompido a meio de uma escrita em crash.
     private void persist() {
         try {
             Path tmp = stateFile.resolveSibling(stateFile.getFileName() + ".tmp");
