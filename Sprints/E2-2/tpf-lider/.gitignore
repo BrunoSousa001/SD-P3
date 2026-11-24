@@ -1,0 +1,8 @@
+registos.log
+**/registos.log
+eventos*.txt
+**/eventos*.txt
+selados/
+**/selados/
+.idea/
+**/.idea/
